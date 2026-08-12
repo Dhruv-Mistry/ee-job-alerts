@@ -48,7 +48,7 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
-        run: python job_alert.py --test
+        run: python job_alert.py
 
       - name: Save seen jobs
         run: |
