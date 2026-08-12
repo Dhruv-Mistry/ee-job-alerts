@@ -27,6 +27,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Verify Discord secret
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "❌ DISCORD_WEBHOOK_URL is EMPTY"
+            exit 1
+          else
+            echo "✅ DISCORD_WEBHOOK_URL is available"
+          fi
+    
       - name: Check internship listings
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
