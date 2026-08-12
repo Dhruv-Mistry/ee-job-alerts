@@ -14,8 +14,8 @@ SOURCE_URL = (
 
 STATE_FILE = Path("seen_jobs.json")
 
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-DISCORD_USER_ID = os.environ.get("DISCORD_USER_ID", "").strip()
+DISCORD_WEBHOOK_URL = os.environ.get("Dhttps://discord.com/api/webhooks/1537165990872219731/cGXbz0QDIQztKMAyHzFQxqYAMwsgD90BpDn9u9iKmFrvgNTAQy6zkbWBSz1gi6tfckXn")
+DISCORD_USER_ID = os.environ.get("cryxtalcrusader", "").strip()
 
 
 # Change these whenever you want.
