@@ -18,6 +18,8 @@ jobs:
 
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
+      BAY_AREA_DISCORD_WEBHOOK_URL: ${{ secrets.BAY_AREA_DISCORD_WEBHOOK_URL }}
+
       DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
 
     steps:
@@ -33,20 +35,24 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Verify Discord secret
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      - name: Verify Discord secrets
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
             echo "❌ DISCORD_WEBHOOK_URL is EMPTY"
             exit 1
-          else
-            echo "✅ DISCORD_WEBHOOK_URL is available"
           fi
+
+          if [ -z "$BAY_AREA_DISCORD_WEBHOOK_URL" ]; then
+            echo "❌ BAY_AREA_DISCORD_WEBHOOK_URL is EMPTY"
+            exit 1
+          fi
+
+          echo "✅ Both Discord webhook secrets are available"
     
       - name: Check internship listings
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          BAY_AREA_DISCORD_WEBHOOK_URL: ${{ secrets.BAY_AREA_DISCORD_WEBHOOK_URL }}
           DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
         run: python job_alert.py
 
