@@ -34,6 +34,10 @@ DISCORD_WEBHOOK_URL = os.environ.get(
     "DISCORD_WEBHOOK_URL", ""
 ).strip()
 
+BAY_AREA_DISCORD_WEBHOOK_URL = os.environ.get(
+    "BAY_AREA_DISCORD_WEBHOOK_URL", ""
+).strip()
+
 DISCORD_USER_ID = os.environ.get(
     "DISCORD_USER_ID", ""
 ).strip()
@@ -256,6 +260,99 @@ US_CITY_ALIASES = {
     "LA",
     "LOS ANGELES",
 }
+
+
+# ============================================================
+# BAY AREA ROUTING
+# ============================================================
+
+# Cities commonly used in internship listings across the
+# San Francisco Bay Area. A multi-location posting counts as
+# Bay Area if ANY listed location matches one of these cities.
+BAY_AREA_CITIES = {
+    "SAN FRANCISCO",
+    "SOUTH SAN FRANCISCO",
+    "DALY CITY",
+    "SAN BRUNO",
+    "BURLINGAME",
+    "MILLBRAE",
+    "SAN MATEO",
+    "FOSTER CITY",
+    "BELMONT",
+    "SAN CARLOS",
+    "REDWOOD CITY",
+    "MENLO PARK",
+    "PALO ALTO",
+    "MOUNTAIN VIEW",
+    "SUNNYVALE",
+    "SANTA CLARA",
+    "SAN JOSE",
+    "MILPITAS",
+    "CUPERTINO",
+    "CAMPBELL",
+    "LOS GATOS",
+    "SARATOGA",
+    "FREMONT",
+    "NEWARK",
+    "UNION CITY",
+    "HAYWARD",
+    "SAN LEANDRO",
+    "OAKLAND",
+    "ALAMEDA",
+    "EMERYVILLE",
+    "BERKELEY",
+    "RICHMOND",
+    "WALNUT CREEK",
+    "CONCORD",
+    "PLEASANTON",
+    "DUBLIN",
+    "LIVERMORE",
+    "SAN RAMON",
+    "PETALUMA",
+    "NOVATO",
+    "SAN RAFAEL",
+}
+
+BAY_AREA_PHRASES = {
+    "BAY AREA",
+    "SAN FRANCISCO BAY AREA",
+    "SF BAY AREA",
+    "SILICON VALLEY",
+}
+
+
+def is_bay_area_job(job):
+    location = clean_text(
+        job.get("location", "")
+    ).upper()
+
+    if not location:
+        return False
+
+    # Explicit regional wording.
+    for phrase in BAY_AREA_PHRASES:
+        if phrase in location:
+            return True
+
+    # Match city names only when the posting indicates California.
+    # This also works for multi-location strings such as:
+    # "Palo Alto, CA | Irvine, CA | Redmond, WA"
+    has_california = (
+        bool(re.search(r"\bCA\b", location))
+        or "CALIFORNIA" in location
+    )
+
+    if not has_california:
+        return False
+
+    for city in BAY_AREA_CITIES:
+        if re.search(
+            rf"(?<![A-Z]){re.escape(city)}(?![A-Z])",
+            location,
+        ):
+            return True
+
+    return False
 
 
 # ============================================================
@@ -958,11 +1055,25 @@ def save_seen(seen):
 
 def send_discord(job):
 
-    if not DISCORD_WEBHOOK_URL:
+    is_bay = is_bay_area_job(job)
+
+    # Bay Area internships go ONLY to #ee-bay.
+    # All other internships go to the existing internship channel.
+    webhook_url = (
+        BAY_AREA_DISCORD_WEBHOOK_URL
+        if is_bay
+        else DISCORD_WEBHOOK_URL
+    )
+
+    if not webhook_url:
+        missing_name = (
+            "BAY_AREA_DISCORD_WEBHOOK_URL"
+            if is_bay
+            else "DISCORD_WEBHOOK_URL"
+        )
 
         raise RuntimeError(
-            "DISCORD_WEBHOOK_URL "
-            "environment variable is missing."
+            f"{missing_name} environment variable is missing."
         )
 
     matches = ", ".join(
@@ -1023,8 +1134,11 @@ def send_discord(job):
         ],
 
         "footer": {
-            "text":
-                "Nationwide US EE Internship Alert"
+            "text": (
+                "Bay Area EE Internship Alert"
+                if is_bay
+                else "Nationwide US EE Internship Alert"
+            )
         },
     }
 
@@ -1038,13 +1152,14 @@ def send_discord(job):
         ],
     }
 
-    # Actual @mention if you add your
-    # numeric Discord ID to GitHub Secrets.
-    if DISCORD_USER_ID:
+    # IMPORTANT:
+    # Only Bay Area jobs @mention you.
+    # Nationwide jobs still post, but silently.
+    if is_bay and DISCORD_USER_ID:
 
         payload["content"] = (
             f"<@{DISCORD_USER_ID}> "
-            "New EE internship"
+            "New Bay Area EE internship"
         )
 
         payload["allowed_mentions"] = {
@@ -1054,7 +1169,7 @@ def send_discord(job):
         }
 
     response = requests.post(
-        DISCORD_WEBHOOK_URL,
+        webhook_url,
         json=payload,
         timeout=30,
     )
@@ -1078,7 +1193,7 @@ def test_alert():
             "Engineering Intern",
 
         "location":
-            "Austin, TX",
+            "San Jose, CA",
 
         "work_model":
             "Hybrid",
@@ -1108,7 +1223,7 @@ def test_alert():
     send_discord(test_job)
 
     print(
-        "Test Discord alert sent."
+        "Test Bay Area Discord alert sent."
     )
 
 
@@ -1252,6 +1367,17 @@ def main():
         f"{len(review_jobs)}"
     )
 
+    bay_area_strong_jobs = [
+        job
+        for job in strong_jobs
+        if is_bay_area_job(job)
+    ]
+
+    print(
+        f"Bay Area strong matches:   "
+        f"{len(bay_area_strong_jobs)}"
+    )
+
     # --------------------------------------------------------
     # SHOW STRONG MATCHES
     # --------------------------------------------------------
@@ -1344,8 +1470,14 @@ def main():
 
     for job in reversed(new_jobs):
 
+        route = (
+            "#ee-bay + @ping"
+            if is_bay_area_job(job)
+            else "#ee-internships (no ping)"
+        )
+
         print(
-            f"ALERT: "
+            f"ALERT -> {route}: "
             f"{job['company']} — "
             f"{job['title']}"
         )
