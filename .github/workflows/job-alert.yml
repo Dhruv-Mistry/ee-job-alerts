@@ -22,6 +22,8 @@ jobs:
 
       DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
 
+      SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+
     steps:
 
       - name: Checkout repository
@@ -54,9 +56,20 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           BAY_AREA_DISCORD_WEBHOOK_URL: ${{ secrets.BAY_AREA_DISCORD_WEBHOOK_URL }}
           DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: python job_alert.py
 
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: internship-diagnostics
+          path: job_diagnostics.csv
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Save seen jobs
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
