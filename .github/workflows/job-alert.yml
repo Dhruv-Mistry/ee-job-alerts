@@ -71,8 +71,8 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           BAY_AREA_DISCORD_WEBHOOK_URL: ${{ secrets.BAY_AREA_DISCORD_WEBHOOK_URL }}
           LA_DISCORD_WEBHOOK_URL: ${{ secrets.LA_DISCORD_WEBHOOK_URL }}
-      SOCAL_DISCORD_WEBHOOK_URL: ${{ secrets.SOCAL_DISCORD_WEBHOOK_URL }}
-      DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
+          SOCAL_DISCORD_WEBHOOK_URL: ${{ secrets.SOCAL_DISCORD_WEBHOOK_URL }}
+          DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
