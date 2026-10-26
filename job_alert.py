@@ -98,7 +98,7 @@ POSITIVE_KEYWORDS = {
     "power electronics": 10,
     "power systems": 8,
     "power system": 8,
-    "power": 5,
+    "power": 2,
     "battery": 5,
     "bess": 7,
     "substation": 8,
@@ -107,7 +107,7 @@ POSITIVE_KEYWORDS = {
     # Controls
     "controls": 7,
     "control systems": 8,
-    "automation": 5,
+    "automation": 2,
     "instrumentation": 7,
 
     # Aerospace / robotics
@@ -119,7 +119,11 @@ POSITIVE_KEYWORDS = {
     # Validation / testing
     "hardware test": 8,
     "validation": 4,
-    "test engineer": 4,
+    "test engineer": 7,
+    "test engineering": 7,
+    "forward deployed": 3,
+    "integration and test": 7,
+    "systems test": 6,
     "failure analysis": 7,
 
     # Systems roles
@@ -167,6 +171,8 @@ NEGATIVE_KEYWORDS = {
 
     "site reliability": -10,
     "devops": -10,
+    "product management": -12,
+    "mba": -12,
 }
 
 
@@ -177,7 +183,7 @@ CATEGORY_BONUS = {
 
 
 # 5+ = Discord notification
-ALERT_THRESHOLD = 5
+ALERT_THRESHOLD = 7
 
 # 2-4 = show in Actions log but don't Discord ping
 REVIEW_THRESHOLD = 2
@@ -342,6 +348,9 @@ def is_bay_area_job(job):
         or "CALIFORNIA" in location
     )
 
+    # ATS boards often return 'Los Angeles; San Francisco' with no CA.
+    if not has_california and re.search(r"\b(SAN FRANCISCO|PALO ALTO|SAN JOSE|SANTA CLARA|MOUNTAIN VIEW|SUNNYVALE|MENLO PARK|REDWOOD CITY|CUPERTINO|BURLINGAME)\b", location):
+        has_california = True
     if not has_california:
         return False
 
@@ -556,6 +565,14 @@ def is_us_job(job):
         or "REMOTE, US" in upper
         or "REMOTE (US)" in upper
     ):
+        return True
+
+    # Structured ATS location tags, e.g. US-CA-SAN-JOSE
+    if re.search(r"\bUS[-_/]CA[-_/]", upper):
+        return True
+
+    # Known US metro cities sometimes appear without a state in ATS feeds.
+    if re.search(r"\b(SAN FRANCISCO|LOS ANGELES|SAN JOSE|SANTA CLARA|PALO ALTO|EL SEGUNDO|REDONDO BEACH|HAWTHORNE|ALAMEDA|SUNNYVALE|MOUNTAIN VIEW)\b", upper):
         return True
 
     # City, state abbreviation:
@@ -1053,29 +1070,8 @@ def save_seen(seen):
 # DISCORD
 # ============================================================
 
-def send_discord(job):
-
+def build_embed(job):
     is_bay = is_bay_area_job(job)
-
-    # Bay Area internships go ONLY to #ee-bay.
-    # All other internships go to the existing internship channel.
-    webhook_url = (
-        BAY_AREA_DISCORD_WEBHOOK_URL
-        if is_bay
-        else DISCORD_WEBHOOK_URL
-    )
-
-    if not webhook_url:
-        missing_name = (
-            "BAY_AREA_DISCORD_WEBHOOK_URL"
-            if is_bay
-            else "DISCORD_WEBHOOK_URL"
-        )
-
-        raise RuntimeError(
-            f"{missing_name} environment variable is missing."
-        )
-
     matches = ", ".join(
         job.get(
             "positive_matches",
@@ -1142,39 +1138,34 @@ def send_discord(job):
         },
     }
 
-    payload = {
+    return embed
 
-        "username":
-            "EE Internship Alerts",
 
-        "embeds": [
-            embed
-        ],
-    }
+def send_discord_batches(jobs, is_bay):
+    """Send up to 10 embeds per Discord message, ping once per Bay batch group."""
+    if not jobs:
+        return 0
+    webhook = BAY_AREA_DISCORD_WEBHOOK_URL if is_bay else DISCORD_WEBHOOK_URL
+    if not webhook:
+        raise RuntimeError("Missing Bay Area or nationwide Discord webhook secret")
+    sent = 0
+    for start in range(0, len(jobs), 10):
+        group = jobs[start:start + 10]
+        payload = {"username": "EE Internship Alerts",
+                   "embeds": [build_embed(job) for job in group],
+                   "allowed_mentions": {"parse": []}}
+        if is_bay and start == 0 and DISCORD_USER_ID and DISCORD_USER_ID.isdigit():
+            payload["content"] = f"<@{DISCORD_USER_ID}> {len(jobs)} new Bay Area EE internship(s)!"
+            payload["allowed_mentions"] = {"users": [DISCORD_USER_ID]}
+        response = requests.post(webhook, json=payload, timeout=30)
+        response.raise_for_status()
+        sent += len(group)
+        yield group
 
-    # IMPORTANT:
-    # Only Bay Area jobs @mention you.
-    # Nationwide jobs still post, but silently.
-    if is_bay and DISCORD_USER_ID:
 
-        payload["content"] = (
-            f"<@{DISCORD_USER_ID}> "
-            "New Bay Area EE internship"
-        )
-
-        payload["allowed_mentions"] = {
-            "users": [
-                DISCORD_USER_ID
-            ]
-        }
-
-    response = requests.post(
-        webhook_url,
-        json=payload,
-        timeout=30,
-    )
-
-    response.raise_for_status()
+def send_discord(job):
+    # Backward-compatible test helper.
+    list(send_discord_batches([job], is_bay_area_job(job)))
 
 
 # ============================================================
@@ -1221,10 +1212,169 @@ def test_alert():
     }
 
     send_discord(test_job)
+    test_job["location"] = "El Segundo, CA"
+    send_discord(test_job)
+    print("Test sent to Bay Area (ping) and nationwide (no ping).")
 
-    print(
-        "Test Bay Area Discord alert sent."
-    )
+
+# ============================================================
+# EXTRA SOURCES: DIRECT COMPANY BOARDS + SEARCH INDEX
+# ============================================================
+
+import csv
+import time
+from datetime import datetime, timezone
+
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
+BOARDS_FILE = Path("company_boards.json")
+REJECTED_REPORT = Path("job_diagnostics.csv")
+
+# Searches include LinkedIn-indexed listings and employer career pages.
+# Search engines cannot guarantee all LinkedIn listings are indexed.
+SEARCH_QUERIES = [
+    'site:linkedin.com/jobs/view/ ("electrical engineering intern" OR "hardware engineer intern") ("2027" OR "summer") California',
+    'site:linkedin.com/jobs/view/ ("avionics" OR "embedded" OR "test engineer") internship 2027 ("Bay Area" OR "Los Angeles")',
+    'site:linkedin.com/jobs/view/ ("FPGA" OR "RF" OR "power electronics") internship 2027 California',
+    '(site:careers.rtx.com OR site:jobs.boeing.com) electrical hardware avionics intern 2027 California',
+    '(site:northropgrumman.com OR site:lockheedmartinjobs.com) electrical engineering intern 2027 California',
+    '(site:careers.l3harris.com OR site:careers.anduril.com) electrical hardware internship 2027',
+    '(site:spacex.com/careers OR site:rocketlabcorp.com OR site:careers.relativityspace.com) avionics electrical internship 2027',
+    '("Revel" OR "Astranis" OR "Planet Labs" OR "Varda") ("hardware" OR "test engineering" OR "electrical") intern 2027',
+    '("General Atomics" OR "AeroVironment" OR "Shield AI" OR "Saronic") electrical intern 2027 California',
+    '("NASA JPL" OR "The Aerospace Corporation" OR "Hermeus") electrical engineering internship 2027',
+    '("NVIDIA" OR "Apple" OR "Qualcomm" OR "AMD") hardware electrical intern 2027 California',
+    '("Tesla" OR "Applied Materials" OR "KLA" OR "Lam Research") electrical hardware intern 2027 California',
+]
+
+INTERNSHIP_RE = re.compile(r"\b(intern(ship)?|co[ -]?op|university student|student engineer)\b", re.I)
+BAD_LEVEL_RE = re.compile(r"\b(senior|staff|principal|director|manager|full[- ]time|graduate program)\b", re.I)
+
+
+def is_internship(job):
+    title = job.get("title", "")
+    return bool(INTERNSHIP_RE.search(title)) and not bool(BAD_LEVEL_RE.search(title))
+
+
+def board_jobs():
+    if not BOARDS_FILE.exists():
+        return []
+    config = json.loads(BOARDS_FILE.read_text())
+    jobs = []
+    for entry in config:
+        company, platform, slug = entry["company"], entry["platform"].lower(), entry["slug"]
+        try:
+            if platform == "greenhouse":
+                endpoint = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+                data = requests.get(endpoint, params={"content": "true"}, timeout=25).json()
+                rows = [{"title": j.get("title", ""), "url": j.get("absolute_url", ""),
+                         "location": j.get("location", {}).get("name", ""),
+                         "description": j.get("content", ""), "date": j.get("updated_at", "")}
+                        for j in data.get("jobs", [])]
+            elif platform == "lever":
+                endpoint = f"https://api.lever.co/v0/postings/{slug}"
+                data = requests.get(endpoint, params={"mode": "json"}, timeout=25).json()
+                rows = [{"title": j.get("text", ""), "url": j.get("hostedUrl", ""),
+                         "location": j.get("categories", {}).get("location", ""),
+                         "description": j.get("descriptionPlain", ""), "date": ""}
+                        for j in data]
+            elif platform == "ashby":
+                endpoint = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+                data = requests.get(endpoint, timeout=25).json()
+                rows = [{"title": j.get("title", ""), "url": j.get("jobUrl", ""),
+                         "location": j.get("location", ""),
+                         "description": j.get("descriptionPlain", ""), "date": j.get("publishedAt", "")}
+                        for j in data.get("jobs", []) if j.get("isListed", True)]
+            else:
+                print(f"SKIP unknown board platform: {platform} / {company}")
+                continue
+            for row in rows:
+                if not row["url"]:
+                    continue
+                jobs.append({"company": company, "title": row["title"],
+                             "url": row["url"], "location": row["location"],
+                             "description": BeautifulSoup(row["description"] or "", "html.parser").get_text(" ", strip=True)[:7000],
+                             "work_model": "Not listed", "date_posted": row["date"] or "Unknown",
+                             "source": f"{company} ({platform})", "category": "Direct company careers"})
+            print(f"BOARD OK {company}: {len(rows)} postings")
+        except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+            print(f"BOARD ERROR {company}: {type(exc).__name__}: {str(exc)[:160]}")
+    return jobs
+
+
+def indexed_search_jobs():
+    if not SERPAPI_KEY:
+        print("SEARCH DISABLED: add SERPAPI_KEY secret to enable indexed LinkedIn and career-site searches")
+        return []
+    jobs = []
+    for query in SEARCH_QUERIES:
+        try:
+            resp = requests.get("https://serpapi.com/search.json", params={
+                "engine": "google", "api_key": SERPAPI_KEY, "q": query,
+                "num": 20, "gl": "us", "hl": "en"}, timeout=40)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("error"):
+                print(f"SEARCH ERROR: {data['error']}")
+                continue
+            for row in data.get("organic_results", []):
+                link = row.get("link", "")
+                title = row.get("title", "")
+                snippet = row.get("snippet", "")
+                if not link or not INTERNSHIP_RE.search(title + " " + snippet):
+                    continue
+                # Search snippets do not always contain structured locations.
+                # Keep them for review if geography cannot be verified.
+                location_match = re.search(
+                    r"\b(?:San Francisco|South San Francisco|San Jose|Palo Alto|Mountain View|Sunnyvale|Santa Clara|Menlo Park|Redwood City|Fremont|Oakland|Berkeley|Burlingame|Los Angeles|El Segundo|Redondo Beach|Long Beach|Pasadena|Irvine|San Diego|Goleta|Santa Monica|Hawthorne|Torrance|Palmdale|Mojave|Sunnyvale|Cupertino|San Mateo|Sacramento)\s*,?\s*(?:CA|California)\b",
+                    title + " " + snippet, re.I)
+                location = location_match.group(0) if location_match else "Unverified location"
+                company = "Unknown (search result)"
+                for name in ("Revel", "RTX", "Raytheon", "Northrop Grumman", "Lockheed Martin", "Boeing", "L3Harris", "Anduril", "SpaceX", "Rocket Lab", "Relativity Space", "Astranis", "Planet Labs", "Varda", "General Atomics", "AeroVironment", "Shield AI", "Saronic", "JPL", "Aerospace Corporation", "NVIDIA", "Apple", "Qualcomm", "AMD", "Tesla", "Applied Materials", "KLA", "Lam Research"):
+                    if name.lower() in (title + " " + snippet).lower():
+                        company = name
+                        break
+                # Remove typical search-result company suffix while preserving title.
+                clean_title = re.sub(r"\s+[|–-]\s+(LinkedIn|Jobs|Careers).*?$", "", title, flags=re.I)
+                jobs.append({"company": company, "title": clean_title, "url": link,
+                             "location": location, "description": snippet,
+                             "work_model": "Not listed", "date_posted": row.get("date", "Unknown"),
+                             "source": "Indexed LinkedIn" if "linkedin.com/jobs" in link else "Indexed career page",
+                             "category": "Search-index discovery"})
+            print(f"SEARCH OK: {query[:62]} ...")
+        except (requests.RequestException, ValueError) as exc:
+            print(f"SEARCH ERROR {type(exc).__name__}: {str(exc)[:120]}")
+    return jobs
+
+
+def score_with_context(job):
+    # Title matches count fully; descriptions provide a capped, modest bonus.
+    score, positives, negatives = score_ee_job(job)
+    desc = job.get("description", "").lower()
+    signals = ["pcb", "schematic", "avionics", "instrumentation", "oscilloscope",
+               "data acquisition", "sensor", "hardware bring-up", "rf telemetry",
+               "power distribution", "analog circuit", "fpga", "embedded system",
+               "electrical design", "circuit design", "hardware test", "test stand"]
+    found = [term for term in signals if contains_term(desc, term)]
+    bonus = min(5, len(found) * 2)
+    if any(contains_term(job["title"], term) for term in ("full stack", "frontend", "backend", "data science")):
+        bonus = 0
+    score += bonus
+    if bonus:
+        positives.extend(["description: " + term for term in found[:3]])
+    # 'Test engineer' title alone is a possible EE role, not a sure thing.
+    if re.search(r"\btest (engineer|engineering)\b", job["title"], re.I) and score < 7 and found:
+        score = max(score, 7)
+    return score, positives, negatives
+
+
+def diagnostic_csv(rows):
+    with REJECTED_REPORT.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["status", "company", "title", "location", "source", "score", "url"])
+        for status, job in rows:
+            writer.writerow([status, job.get("company", ""), job.get("title", ""),
+                             job.get("location", ""), job.get("source", ""),
+                             job.get("match_score", ""), job.get("url", "")])
 
 
 # ============================================================
@@ -1232,276 +1382,86 @@ def test_alert():
 # ============================================================
 
 def main():
-
     if "--test" in sys.argv:
-
         test_alert()
-
         return
 
-    # --------------------------------------------------------
-    # DOWNLOAD BOTH SOURCES
-    # --------------------------------------------------------
+    diagnostics = []
+    feeds = []
+    for label, url, parser in (("Jobright", JOBRIGHT_URL, parse_jobright),
+                               ("Simplify", SIMPLIFY_URL, parse_simplify)):
+        try:
+            jobs = parser(download_text(url))
+            feeds.extend(jobs)
+            print(f"SOURCE {label}: {len(jobs)} jobs")
+        except requests.RequestException as exc:
+            print(f"SOURCE FAILED {label}: {exc}")
 
-    jobright_text = download_text(
-        JOBRIGHT_URL
-    )
+    boards = board_jobs()
+    indexed = indexed_search_jobs()
+    raw = feeds + boards + indexed
+    print(f"RAW: {len(raw)}; direct boards: {len(boards)}; indexed: {len(indexed)}")
+    if not raw:
+        raise RuntimeError("No sources returned any jobs; refusing to update seen state")
 
-    simplify_text = download_text(
-        SIMPLIFY_URL
-    )
+    # Check internship and location BEFORE deduplication so a poorer
+    # duplicate cannot displace a richer record from another source.
+    candidates = []
+    for job in raw:
+        if not is_internship(job):
+            diagnostics.append(("not_internship", job))
+        elif not is_us_job(job):
+            diagnostics.append(("location_unverified_or_non_us", job))
+        else:
+            candidates.append(job)
 
-    # --------------------------------------------------------
-    # PARSE BOTH SOURCES
-    # --------------------------------------------------------
-
-    jobright_jobs = parse_jobright(
-        jobright_text
-    )
-
-    simplify_jobs = parse_simplify(
-        simplify_text
-    )
-
-    raw_jobs = (
-        jobright_jobs
-        + simplify_jobs
-    )
-
-    # --------------------------------------------------------
-    # UNITED STATES ONLY
-    # --------------------------------------------------------
-
-    us_jobs = [
-        job
-        for job in raw_jobs
-        if is_us_job(job)
-    ]
-
-    # --------------------------------------------------------
-    # REMOVE DUPLICATES
-    # --------------------------------------------------------
-
-    unique_jobs = deduplicate_jobs(
-        us_jobs
-    )
-
-    # --------------------------------------------------------
-    # SCORE EE RELEVANCE
-    # --------------------------------------------------------
-
-    strong_jobs = []
-    review_jobs = []
-
-    for job in unique_jobs:
-
-        (
-            score,
-            positive,
-            negative,
-        ) = score_ee_job(job)
-
-        job["match_score"] = score
-
-        job["positive_matches"] = (
-            positive
-        )
-
-        job["negative_matches"] = (
-            negative
-        )
-
+    # Prioritize direct employer listings and rich descriptions.
+    candidates.sort(key=lambda j: ("Direct company careers" not in j.get("category", ""),
+                                   -len(j.get("description", ""))))
+    unique = deduplicate_jobs(candidates)
+    strong, review = [], []
+    for job in unique:
+        score, positive, negative = score_with_context(job)
+        job["match_score"], job["positive_matches"], job["negative_matches"] = score, positive, negative
         if score >= ALERT_THRESHOLD:
-
-            strong_jobs.append(job)
-
+            strong.append(job)
+            diagnostics.append(("strong", job))
         elif score >= REVIEW_THRESHOLD:
+            review.append(job)
+            diagnostics.append(("review_only", job))
+        else:
+            diagnostics.append(("low_score", job))
+    diagnostic_csv(diagnostics)
+    print(f"US internship candidates: {len(candidates)}; unique: {len(unique)}")
+    print(f"Strong EE: {len(strong)}; review: {len(review)}")
+    print("Diagnostics saved: job_diagnostics.csv")
+    for job in review[:35]:
+        print(f"REVIEW [{job['match_score']}]: {job['company']} | {job['title']} | {job['location']}")
 
-            review_jobs.append(job)
-
-    # --------------------------------------------------------
-    # REPORT
-    # --------------------------------------------------------
-
-    print(
-        "========== JOB ALERT REPORT =========="
-    )
-
-    print(
-        f"Jobright fetched:          "
-        f"{len(jobright_jobs)}"
-    )
-
-    print(
-        f"Simplify fetched:          "
-        f"{len(simplify_jobs)}"
-    )
-
-    print(
-        f"Raw listings:              "
-        f"{len(raw_jobs)}"
-    )
-
-    print(
-        f"Non-US/ambiguous removed:  "
-        f"{len(raw_jobs) - len(us_jobs)}"
-    )
-
-    print(
-        f"Duplicates removed:        "
-        f"{len(us_jobs) - len(unique_jobs)}"
-    )
-
-    print(
-        f"Unique US listings:        "
-        f"{len(unique_jobs)}"
-    )
-
-    print(
-        f"Strong EE matches:         "
-        f"{len(strong_jobs)}"
-    )
-
-    print(
-        f"Possible EE matches:       "
-        f"{len(review_jobs)}"
-    )
-
-    bay_area_strong_jobs = [
-        job
-        for job in strong_jobs
-        if is_bay_area_job(job)
-    ]
-
-    print(
-        f"Bay Area strong matches:   "
-        f"{len(bay_area_strong_jobs)}"
-    )
-
-    # --------------------------------------------------------
-    # SHOW STRONG MATCHES
-    # --------------------------------------------------------
-
-    print(
-        "\n=== STRONG MATCHES ==="
-    )
-
-    for job in strong_jobs:
-
-        print(
-            f"[{job['match_score']}] "
-            f"{job['company']} — "
-            f"{job['title']} "
-            f"({job['location']}) "
-            f"[{job['source']}]"
-        )
-
-    # --------------------------------------------------------
-    # SHOW BORDERLINE MATCHES
-    # --------------------------------------------------------
-
-    print(
-        "\n=== POSSIBLE MATCHES "
-        "(not alerted) ==="
-    )
-
-    for job in review_jobs:
-
-        print(
-            f"[{job['match_score']}] "
-            f"{job['company']} — "
-            f"{job['title']} "
-            f"({job['location']}) "
-            f"[{job['source']}]"
-        )
-
-    # --------------------------------------------------------
-    # LOAD PREVIOUS JOBS
-    # --------------------------------------------------------
-
+    first_run = not STATE_FILE.exists()
     seen = load_seen()
-
-    # --------------------------------------------------------
-    # FIRST RUN = BASELINE
-    # --------------------------------------------------------
-
-    if not STATE_FILE.exists():
-
-        for job in strong_jobs:
-
-            seen.add(
-                job["normalized_url"]
-            )
-
+    if first_run:
+        seen.update(j["normalized_url"] for j in strong)
         save_seen(seen)
-
-        print(
-            "\nFirst run complete. "
-            "Existing strong EE matches "
-            "were saved without sending alerts."
-        )
-
+        print("First run baseline created. No alerts sent.")
         return
 
-    # --------------------------------------------------------
-    # DETECT NEW JOBS
-    # --------------------------------------------------------
+    new = [j for j in strong if j["normalized_url"] not in seen]
+    bay = [j for j in new if is_bay_area_job(j)]
+    nationwide = [j for j in new if not is_bay_area_job(j)]
+    print(f"NEW {len(new)}: Bay Area {len(bay)}; other US {len(nationwide)}")
 
-    new_jobs = [
-
-        job
-
-        for job in strong_jobs
-
-        if (
-            job["normalized_url"]
-            not in seen
-        )
-    ]
-
-    print(
-        f"\nNew strong EE matches:     "
-        f"{len(new_jobs)}"
-    )
-
-    # --------------------------------------------------------
-    # SEND ALERTS
-    # --------------------------------------------------------
-
-    for job in reversed(new_jobs):
-
-        route = (
-            "#ee-bay + @ping"
-            if is_bay_area_job(job)
-            else "#ee-internships (no ping)"
-        )
-
-        print(
-            f"ALERT -> {route}: "
-            f"{job['company']} — "
-            f"{job['title']}"
-        )
-
-        send_discord(job)
-
-        seen.add(
-            job["normalized_url"]
-        )
-
-    # --------------------------------------------------------
-    # SAVE STATE
-    # --------------------------------------------------------
-
-    save_seen(seen)
-
-    print(
-        f"Discord alerts sent:       "
-        f"{len(new_jobs)}"
-    )
-
-    print(
-        "======================================"
-    )
+    # Post all discoveries in grouped Discord batches. Discord limits embeds
+    # to 10 per message. Save seen immediately after EACH successful batch.
+    for group in send_discord_batches(bay, True):
+        seen.update(j["normalized_url"] for j in group)
+        save_seen(seen)
+        print(f"SENT Bay Area batch: {len(group)}")
+    for group in send_discord_batches(nationwide, False):
+        seen.update(j["normalized_url"] for j in group)
+        save_seen(seen)
+        print(f"SENT nationwide batch: {len(group)}")
+    print(f"Done. Sent {len(new)} new internships in this run.")
 
 
 if __name__ == "__main__":
