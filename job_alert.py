@@ -38,6 +38,9 @@ BAY_AREA_DISCORD_WEBHOOK_URL = os.environ.get(
     "BAY_AREA_DISCORD_WEBHOOK_URL", ""
 ).strip()
 
+LA_DISCORD_WEBHOOK_URL = os.environ.get("LA_DISCORD_WEBHOOK_URL", "").strip()
+SOCAL_DISCORD_WEBHOOK_URL = os.environ.get("SOCAL_DISCORD_WEBHOOK_URL", "").strip()
+
 DISCORD_USER_ID = os.environ.get(
     "DISCORD_USER_ID", ""
 ).strip()
@@ -362,6 +365,73 @@ def is_bay_area_job(job):
             return True
 
     return False
+
+
+# Regional priority: Bay Area > Greater Los Angeles > other Southern California
+# > other US. A multi-location posting goes to the highest-priority match.
+LA_CITIES = {
+    "LOS ANGELES", "HOLLYWOOD", "WEST HOLLYWOOD", "NORTH HOLLYWOOD",
+    "SANTA MONICA", "CULVER CITY", "BEVERLY HILLS", "BURBANK", "GLENDALE",
+    "PASADENA", "ALTADENA", "ARCADIA", "MONROVIA", "AZUSA", "POMONA",
+    "EL SEGUNDO", "HAWTHORNE", "INGLEWOOD", "GARDENA", "TORRANCE",
+    "REDONDO BEACH", "HERMOSA BEACH", "MANHATTAN BEACH", "LONG BEACH",
+    "CARSON", "COMPTON", "DOWNEY", "NORWALK", "CERRITOS",
+    "LAKEWOOD", "SIGNAL HILL", "PALOS VERDES", "ROLLING HILLS",
+    "RANCHO PALOS VERDES", "MARINA DEL REY", "PLAYA VISTA",
+    "WOODLAND HILLS", "CANOGA PARK", "CHATSWORTH", "NORTHRIDGE",
+    "VAN NUYS", "SHERMAN OAKS", "ENCINO", "TARZANA", "CALABASAS",
+    "AGOURA HILLS", "WESTLAKE VILLAGE", "THOUSAND OAKS", "NEWBURY PARK",
+    "SIMI VALLEY", "MOORPARK", "CAMARILLO", "OXNARD", "VENTURA",
+    "SANTA CLARITA", "VALENCIA", "SYLMAR", "SAN FERNANDO",
+    "LANCASTER", "PALMDALE", "EDWARDS AFB", "EDWARDS AIR FORCE BASE",
+    "CITY OF INDUSTRY", "INDUSTRY", "DIAMOND BAR", "WALNUT",
+    "WEST COVINA", "COVINA", "WHITTIER", "LA MIRADA", "PARAMOUNT",
+    "SOUTH GATE", "HUNTINGTON PARK", "ALHAMBRA", "MONTEREY PARK",
+}
+LA_PHRASES = {"GREATER LOS ANGELES", "LOS ANGELES METRO", "LOS ANGELES COUNTY", "LA METRO AREA"}
+SOCAL_CITIES = {
+    "SAN DIEGO", "LA JOLLA", "SORRENTO VALLEY", "MIRA MESA", "SCRIPPS RANCH",
+    "CARLSBAD", "OCEANSIDE", "VISTA", "SAN MARCOS", "ESCONDIDO",
+    "ENCINITAS", "SOLANA BEACH", "DEL MAR", "POWAY", "RANCHO BERNARDO",
+    "CHULA VISTA", "NATIONAL CITY", "EL CAJON", "LA MESA", "SANTEE",
+    "CORONADO", "IMPERIAL BEACH", "TEMECULA", "MURRIETA", "RIVERSIDE",
+    "CORONA", "MORENO VALLEY", "ONTARIO", "RANCHO CUCAMONGA",
+    "FONTANA", "SAN BERNARDINO", "REDLANDS", "UPLAND", "CHINO",
+    "CHINO HILLS", "PALM SPRINGS", "PALM DESERT", "INDIO", "COACHELLA",
+    "IRVINE", "COSTA MESA", "NEWPORT BEACH", "HUNTINGTON BEACH",
+    "ANAHEIM", "FULLERTON", "ORANGE", "SANTA ANA", "TUSTIN",
+    "LAKE FOREST", "MISSION VIEJO", "LAGUNA HILLS", "LAGUNA NIGUEL",
+    "LAGUNA BEACH", "ALISO VIEJO", "FOOTHILL RANCH", "GARDEN GROVE",
+    "WESTMINSTER", "BUENA PARK", "CYPRESS", "LOS ALAMITOS",
+    "SEAL BEACH", "YORBA LINDA", "PLACENTIA", "BREA", "SAN CLEMENTE",
+    "SAN JUAN CAPISTRANO", "BAKERSFIELD", "RIDGECREST", "CHINA LAKE",
+    "MOJAVE", "TEHACHAPI", "BARSTOW", "VICTORVILLE", "HESPERIA",
+}
+SOCAL_PHRASES = {"SOUTHERN CALIFORNIA", "SOCAL", "SAN DIEGO COUNTY", "ORANGE COUNTY", "INLAND EMPIRE"}
+
+
+def _region_city_match(location, cities):
+    # A city alone is accepted only if California is specified, or if it is a
+    # distinctive metro name; prevents matching e.g. Ontario, Canada.
+    has_ca = bool(re.search(r"\bCA\b|\bCALIFORNIA\b", location))
+    distinctive = {"LOS ANGELES", "SAN DIEGO", "EL SEGUNDO", "HAWTHORNE", "IRVINE", "CARLSBAD", "LA JOLLA", "EDWARDS AFB", "EDWARDS AIR FORCE BASE"}
+    return any(
+        (has_ca or city in distinctive)
+        and re.search(rf"(?<![A-Z]){re.escape(city)}(?![A-Z])", location)
+        for city in cities
+    )
+
+
+def job_region(job):
+    """Return 'bay', 'la', 'socal', or 'nationwide'."""
+    if is_bay_area_job(job):
+        return "bay"
+    location = clean_text(job.get("location", "")).upper()
+    if any(phrase in location for phrase in LA_PHRASES) or _region_city_match(location, LA_CITIES):
+        return "la"
+    if any(phrase in location for phrase in SOCAL_PHRASES) or _region_city_match(location, SOCAL_CITIES):
+        return "socal"
+    return "nationwide"
 
 
 # ============================================================
@@ -1071,7 +1141,7 @@ def save_seen(seen):
 # ============================================================
 
 def build_embed(job):
-    is_bay = is_bay_area_job(job)
+    region = job_region(job)
     matches = ", ".join(
         job.get(
             "positive_matches",
@@ -1131,9 +1201,9 @@ def build_embed(job):
 
         "footer": {
             "text": (
-                "Bay Area EE Internship Alert"
-                if is_bay
-                else "Nationwide US EE Internship Alert"
+                {"bay": "Bay Area", "la": "Greater Los Angeles",
+                 "socal": "San Diego / Other SoCal",
+                 "nationwide": "Other US"}[region] + " EE Internship Alert"
             )
         },
     }
@@ -1141,31 +1211,43 @@ def build_embed(job):
     return embed
 
 
-def send_discord_batches(jobs, is_bay):
-    """Send up to 10 embeds per Discord message, ping once per Bay batch group."""
+REGION_WEBHOOKS = {
+    "bay": lambda: BAY_AREA_DISCORD_WEBHOOK_URL,
+    "la": lambda: LA_DISCORD_WEBHOOK_URL,
+    "socal": lambda: SOCAL_DISCORD_WEBHOOK_URL,
+    "nationwide": lambda: DISCORD_WEBHOOK_URL,
+}
+REGION_NAMES = {
+    "bay": "Bay Area", "la": "Los Angeles",
+    "socal": "San Diego / Other SoCal", "nationwide": "Other US",
+}
+
+
+def send_discord_batches(jobs, region):
+    """Send batches of up to 10 embeds; ping only for Bay Area jobs."""
     if not jobs:
-        return 0
-    webhook = BAY_AREA_DISCORD_WEBHOOK_URL if is_bay else DISCORD_WEBHOOK_URL
+        return
+    webhook = REGION_WEBHOOKS[region]()
     if not webhook:
-        raise RuntimeError("Missing Bay Area or nationwide Discord webhook secret")
-    sent = 0
+        raise RuntimeError(f"Missing Discord webhook for region: {region}")
     for start in range(0, len(jobs), 10):
         group = jobs[start:start + 10]
-        payload = {"username": "EE Internship Alerts",
-                   "embeds": [build_embed(job) for job in group],
-                   "allowed_mentions": {"parse": []}}
-        if is_bay and start == 0 and DISCORD_USER_ID and DISCORD_USER_ID.isdigit():
-            payload["content"] = f"<@{DISCORD_USER_ID}> {len(jobs)} new Bay Area EE internship(s)!"
+        payload = {
+            "username": "EE Internship Alerts",
+            "embeds": [build_embed(job) for job in group],
+            "allowed_mentions": {"parse": []},
+            "content": f"{len(jobs)} new {REGION_NAMES[region]} EE internship(s)!" if start == 0 else "",
+        }
+        if region == "bay" and start == 0 and DISCORD_USER_ID.isdigit():
+            payload["content"] = f"<@{DISCORD_USER_ID}> " + payload["content"]
             payload["allowed_mentions"] = {"users": [DISCORD_USER_ID]}
         response = requests.post(webhook, json=payload, timeout=30)
         response.raise_for_status()
-        sent += len(group)
         yield group
 
 
 def send_discord(job):
-    # Backward-compatible test helper.
-    list(send_discord_batches([job], is_bay_area_job(job)))
+    list(send_discord_batches([job], job_region(job)))
 
 
 # ============================================================
@@ -1212,9 +1294,10 @@ def test_alert():
     }
 
     send_discord(test_job)
-    test_job["location"] = "El Segundo, CA"
-    send_discord(test_job)
-    print("Test sent to Bay Area (ping) and nationwide (no ping).")
+    for location in ["El Segundo, CA", "San Diego, CA", "Austin, TX"]:
+        test_job["location"] = location
+        send_discord(test_job)
+    print("Test sent to Bay Area, LA, SoCal, and other US channels.")
 
 
 # ============================================================
@@ -1525,20 +1608,19 @@ def main():
         return
 
     new = [j for j in strong if j["normalized_url"] not in seen]
-    bay = [j for j in new if is_bay_area_job(j)]
-    nationwide = [j for j in new if not is_bay_area_job(j)]
-    print(f"NEW {len(new)}: Bay Area {len(bay)}; other US {len(nationwide)}")
+    grouped = {region: [] for region in REGION_WEBHOOKS}
+    for job in new:
+        grouped[job_region(job)].append(job)
+    print("NEW " + str(len(new)) + ": " + "; ".join(
+        f"{REGION_NAMES[region]} {len(jobs)}" for region, jobs in grouped.items()
+    ))
 
-    # Post all discoveries in grouped Discord batches. Discord limits embeds
-    # to 10 per message. Save seen immediately after EACH successful batch.
-    for group in send_discord_batches(bay, True):
-        seen.update(j["normalized_url"] for j in group)
-        save_seen(seen)
-        print(f"SENT Bay Area batch: {len(group)}")
-    for group in send_discord_batches(nationwide, False):
-        seen.update(j["normalized_url"] for j in group)
-        save_seen(seen)
-        print(f"SENT nationwide batch: {len(group)}")
+    # Persist after each successfully delivered batch to avoid duplicate alerts.
+    for region, jobs in grouped.items():
+        for group in send_discord_batches(jobs, region):
+            seen.update(j["normalized_url"] for j in group)
+            save_seen(seen)
+            print(f"SENT {REGION_NAMES[region]} batch: {len(group)}")
     print(f"Done. Sent {len(new)} new internships in this run.")
 
 
