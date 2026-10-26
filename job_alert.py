@@ -1265,21 +1265,27 @@ def board_jobs():
         try:
             if platform == "greenhouse":
                 endpoint = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
-                data = requests.get(endpoint, params={"content": "true"}, timeout=25).json()
+                response = requests.get(endpoint, params={"content": "true"}, timeout=25)
+                response.raise_for_status()
+                data = response.json()
                 rows = [{"title": j.get("title", ""), "url": j.get("absolute_url", ""),
                          "location": j.get("location", {}).get("name", ""),
                          "description": j.get("content", ""), "date": j.get("updated_at", "")}
                         for j in data.get("jobs", [])]
             elif platform == "lever":
                 endpoint = f"https://api.lever.co/v0/postings/{slug}"
-                data = requests.get(endpoint, params={"mode": "json"}, timeout=25).json()
+                response = requests.get(endpoint, params={"mode": "json"}, timeout=25)
+                response.raise_for_status()
+                data = response.json()
                 rows = [{"title": j.get("text", ""), "url": j.get("hostedUrl", ""),
                          "location": j.get("categories", {}).get("location", ""),
                          "description": j.get("descriptionPlain", ""), "date": ""}
                         for j in data]
             elif platform == "ashby":
                 endpoint = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
-                data = requests.get(endpoint, timeout=25).json()
+                response = requests.get(endpoint, timeout=25)
+                response.raise_for_status()
+                data = response.json()
                 rows = [{"title": j.get("title", ""), "url": j.get("jobUrl", ""),
                          "location": j.get("location", ""),
                          "description": j.get("descriptionPlain", ""), "date": j.get("publishedAt", "")}
@@ -1301,48 +1307,120 @@ def board_jobs():
     return jobs
 
 
+# Search runs only on the dedicated daily GitHub Actions schedule.
+# Manual runs can opt in using RUN_WEB_SEARCH=true.
+RUN_WEB_SEARCH = os.getenv("RUN_WEB_SEARCH", "false").lower() == "true"
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "").strip()
+SEARCHES_PER_DAY = max(0, min(int(os.getenv("SEARCHES_PER_DAY", "3")), 6))
+
+# Reject generic result pages and require identifiable employers.
+SEARCH_HOST_BLOCKLIST = ("google.com", "bing.com", "indeed.com", "glassdoor.com",
+                         "ziprecruiter.com", "simplyhired.com", "talent.com")
+KNOWN_EMPLOYERS = ("Revel", "RTX", "Raytheon", "Northrop Grumman", "Lockheed Martin",
+                   "Boeing", "L3Harris", "Anduril", "SpaceX", "Rocket Lab",
+                   "Relativity Space", "Astranis", "Planet Labs", "Varda",
+                   "General Atomics", "AeroVironment", "Shield AI", "Saronic",
+                   "JPL", "Aerospace Corporation", "NVIDIA", "Apple", "Qualcomm",
+                   "AMD", "Tesla", "Applied Materials", "KLA", "Lam Research",
+                   "Pyka", "Joby Aviation", "Archer Aviation", "Skydio", "Hadrian")
+
+
+def extract_search_job(row):
+    link = (row.get("link") or row.get("url") or "").strip()
+    title = BeautifulSoup(row.get("title") or "", "html.parser").get_text(" ", strip=True)
+    snippet = BeautifulSoup(row.get("snippet") or row.get("content") or "", "html.parser").get_text(" ", strip=True)
+    host = urlsplit(link).netloc.lower().removeprefix("www.")
+    path = urlsplit(link).path.lower()
+    if not link.startswith("https://") or not host or any(host == h or host.endswith("." + h) for h in SEARCH_HOST_BLOCKLIST):
+        return None
+    if any(token in path for token in ("/jobs/search", "/jobs/collections", "/jobs/jobs", "/search/jobs")):
+        return None
+    if host == "linkedin.com" and not re.match(r"^/jobs/view/(?:[^/]*-)?\d+/?$", path):
+        return None
+    # Require an actual internship title, not just a search snippet mentioning internships.
+    title = re.sub(r"\s+[|–-]\s+(LinkedIn|Jobs|Careers).*?$", "", title, flags=re.I)
+    if not is_internship({"title": title}) or re.search(r"\b(jobs in|job openings|job listings|internship jobs|top internships)\b", title, re.I):
+        return None
+    company = next((name for name in KNOWN_EMPLOYERS if re.search(r"(?<![a-z])" + re.escape(name) + r"(?![a-z])", title + " " + snippet, re.I)), None)
+    # LinkedIn often formats results as "Job Title - Company | LinkedIn".
+    if not company:
+        m = re.search(r"\s(?:at|@)\s+([A-Z][\w& .-]{2,50})(?:\s*[|–-]|$)", title)
+        if m:
+            company = m.group(1).strip()
+    if not company:
+        return None
+    location_match = re.search(
+        r"\b(?:San Francisco|South San Francisco|San Jose|Palo Alto|Mountain View|Sunnyvale|Santa Clara|Menlo Park|Redwood City|Fremont|Oakland|Berkeley|Burlingame|Los Angeles|El Segundo|Redondo Beach|Long Beach|Pasadena|Irvine|San Diego|Goleta|Santa Monica|Hawthorne|Torrance|Palmdale|Mojave|Cupertino|San Mateo|Sacramento)\s*,?\s*(?:CA|California)\b",
+        title + " " + snippet, re.I)
+    if not location_match:
+        return None
+    return {"company": company, "title": title, "url": link,
+            "location": location_match.group(0), "description": snippet,
+            "work_model": "Not listed", "date_posted": row.get("date", "Unknown"),
+            "source": "Indexed LinkedIn" if host == "linkedin.com" else "Indexed career page",
+            "category": "Search-index discovery"}
+
+
+def provider_search(provider, query):
+    if provider == "tavily":
+        resp = requests.post("https://api.tavily.com/search", json={
+            "api_key": TAVILY_API_KEY, "query": query, "search_depth": "basic", "max_results": 15}, timeout=35)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("error"):
+            raise ValueError(str(data["error"])[:150])
+        return [{"link": x.get("url"), "title": x.get("title"), "snippet": x.get("content")}
+                for x in data.get("results", [])]
+    if provider == "brave":
+        resp = requests.get("https://api.search.brave.com/res/v1/web/search", params={
+            "q": query, "count": 20, "country": "us", "search_lang": "en"},
+            headers={"X-Subscription-Token": BRAVE_API_KEY, "Accept": "application/json"}, timeout=35)
+        resp.raise_for_status()
+        return [{"link": x.get("url"), "title": x.get("title"), "snippet": x.get("description")}
+                for x in resp.json().get("web", {}).get("results", [])]
+    resp = requests.get("https://serpapi.com/search.json", params={
+        "engine": "google", "api_key": SERPAPI_KEY, "q": query,
+        "num": 20, "gl": "us", "hl": "en"}, timeout=35)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("error"):
+        raise ValueError(str(data["error"])[:150])
+    return data.get("organic_results", [])
+
+
 def indexed_search_jobs():
-    if not SERPAPI_KEY:
-        print("SEARCH DISABLED: add SERPAPI_KEY secret to enable indexed LinkedIn and career-site searches")
+    if not RUN_WEB_SEARCH:
+        print("SEARCH SKIPPED: scheduled for daily run only")
         return []
+    providers = [("tavily", TAVILY_API_KEY), ("brave", BRAVE_API_KEY), ("serpapi", SERPAPI_KEY)]
+    available = [name for name, key in providers if key]
+    if not available:
+        print("SEARCH SKIPPED: no search API keys configured; direct sources continue")
+        return []
+    # Rotate queries by UTC day to cover the full list over several days,
+    # without consuming 12 searches every two hours.
+    day = datetime.now(timezone.utc).toordinal()
+    offset = ((day - 1) * SEARCHES_PER_DAY) % len(SEARCH_QUERIES)
+    queries = [SEARCH_QUERIES[(offset + i) % len(SEARCH_QUERIES)] for i in range(SEARCHES_PER_DAY)]
     jobs = []
-    for query in SEARCH_QUERIES:
-        try:
-            resp = requests.get("https://serpapi.com/search.json", params={
-                "engine": "google", "api_key": SERPAPI_KEY, "q": query,
-                "num": 20, "gl": "us", "hl": "en"}, timeout=40)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("error"):
-                print(f"SEARCH ERROR: {data['error']}")
+    disabled = set()
+    for query in queries:
+        for provider in available:
+            if provider in disabled:
                 continue
-            for row in data.get("organic_results", []):
-                link = row.get("link", "")
-                title = row.get("title", "")
-                snippet = row.get("snippet", "")
-                if not link or not INTERNSHIP_RE.search(title + " " + snippet):
-                    continue
-                # Search snippets do not always contain structured locations.
-                # Keep them for review if geography cannot be verified.
-                location_match = re.search(
-                    r"\b(?:San Francisco|South San Francisco|San Jose|Palo Alto|Mountain View|Sunnyvale|Santa Clara|Menlo Park|Redwood City|Fremont|Oakland|Berkeley|Burlingame|Los Angeles|El Segundo|Redondo Beach|Long Beach|Pasadena|Irvine|San Diego|Goleta|Santa Monica|Hawthorne|Torrance|Palmdale|Mojave|Sunnyvale|Cupertino|San Mateo|Sacramento)\s*,?\s*(?:CA|California)\b",
-                    title + " " + snippet, re.I)
-                location = location_match.group(0) if location_match else "Unverified location"
-                company = "Unknown (search result)"
-                for name in ("Revel", "RTX", "Raytheon", "Northrop Grumman", "Lockheed Martin", "Boeing", "L3Harris", "Anduril", "SpaceX", "Rocket Lab", "Relativity Space", "Astranis", "Planet Labs", "Varda", "General Atomics", "AeroVironment", "Shield AI", "Saronic", "JPL", "Aerospace Corporation", "NVIDIA", "Apple", "Qualcomm", "AMD", "Tesla", "Applied Materials", "KLA", "Lam Research"):
-                    if name.lower() in (title + " " + snippet).lower():
-                        company = name
-                        break
-                # Remove typical search-result company suffix while preserving title.
-                clean_title = re.sub(r"\s+[|–-]\s+(LinkedIn|Jobs|Careers).*?$", "", title, flags=re.I)
-                jobs.append({"company": company, "title": clean_title, "url": link,
-                             "location": location, "description": snippet,
-                             "work_model": "Not listed", "date_posted": row.get("date", "Unknown"),
-                             "source": "Indexed LinkedIn" if "linkedin.com/jobs" in link else "Indexed career page",
-                             "category": "Search-index discovery"})
-            print(f"SEARCH OK: {query[:62]} ...")
-        except (requests.RequestException, ValueError) as exc:
-            print(f"SEARCH ERROR {type(exc).__name__}: {str(exc)[:120]}")
+            try:
+                rows = provider_search(provider, query)
+                accepted = [j for row in rows if (j := extract_search_job(row))]
+                jobs.extend(accepted)
+                print(f"SEARCH OK {provider}: {len(rows)} results; {len(accepted)} verified candidates")
+                break
+            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+                print(f"SEARCH UNAVAILABLE {provider}: {type(exc).__name__}: {str(exc)[:150]}; trying backup")
+                disabled.add(provider)  # Don't retry an exhausted provider in this run.
+        else:
+            print("SEARCH SKIPPED: all configured providers unavailable; continuing with other sources")
+            break
     return jobs
 
 
