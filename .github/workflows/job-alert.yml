@@ -5,6 +5,11 @@ on:
 
   schedule:
     - cron: "17 */2 * * *"
+    - cron: "37 9 * * *"  # daily web search, 09:37 UTC
+
+concurrency:
+  group: ee-internship-tracker
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -23,6 +28,10 @@ jobs:
       DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
 
       SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+      RUN_WEB_SEARCH: ${{ github.event_name == 'schedule' && github.event.schedule == '37 9 * * *' }}
+      SEARCHES_PER_DAY: "3"
 
     steps:
 
@@ -57,6 +66,9 @@ jobs:
           BAY_AREA_DISCORD_WEBHOOK_URL: ${{ secrets.BAY_AREA_DISCORD_WEBHOOK_URL }}
           DISCORD_USER_ID: ${{ secrets.DISCORD_USER_ID }}
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          SEARCHES_PER_DAY: "3"
         run: python job_alert.py
 
       - name: Upload diagnostics
